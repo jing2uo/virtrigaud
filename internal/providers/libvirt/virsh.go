@@ -592,36 +592,44 @@ func (v *VirshProvider) runVirshCommandOnce(ctx context.Context, args ...string)
 
 // listDomains lists all domains (VMs) using virsh
 func (v *VirshProvider) listDomains(ctx context.Context) ([]VirshDomain, error) {
-	// Get all domains (running and shut off)
-	result, err := v.runVirshCommand(ctx, "list", "--all", "--name")
+	// One `virsh list --all` yields name AND state for every domain, replacing the
+	// old per-domain `virsh domstate` N+1 (one SSH round-trip per VM).
+	result, err := v.runVirshCommand(ctx, "list", "--all")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list domains: %w", err)
 	}
+	return parseDomainListTable(result.Stdout), nil
+}
 
+// parseDomainListTable parses `virsh list --all` table output (columns: Id, Name,
+// State) into domains. State may be two words ("shut off"), so it is everything
+// after the name column. The leading header and the dashed separator are skipped.
+func parseDomainListTable(stdout string) []VirshDomain {
 	var domains []VirshDomain
-	lines := strings.Split(strings.TrimSpace(result.Stdout), "\n")
-
-	for i, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	pastHeader := false
+	for _, line := range strings.Split(stdout, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
 			continue
 		}
-
-		// Get domain state
-		stateResult, err := v.runVirshCommand(ctx, "domstate", line)
-		state := "unknown"
-		if err == nil {
-			state = strings.TrimSpace(stateResult.Stdout)
+		if !pastHeader {
+			// The dashed separator line sits between the header and the rows.
+			if strings.HasPrefix(trimmed, "---") {
+				pastHeader = true
+			}
+			continue
 		}
-
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue // need at least Id, Name, State
+		}
 		domains = append(domains, VirshDomain{
-			ID:    fmt.Sprintf("%d", i),
-			Name:  line,
-			State: state,
+			ID:    fmt.Sprintf("%d", len(domains)),
+			Name:  fields[1],
+			State: strings.Join(fields[2:], " "),
 		})
 	}
-
-	return domains, nil
+	return domains
 }
 
 // startDomain starts a defined domain
